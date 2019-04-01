@@ -2,11 +2,11 @@ import * as next from "next";
 import * as http from 'http';
 import * as express from 'express'
 import { json } from 'body-parser';
-import { Span, SpanKind, RootSpan, HeaderGetter } from '@opencensus/core';
+import { HeaderGetter } from '@opencensus/core';
 import * as tracing from '@opencensus/nodejs';
 import { JaegerTraceExporter } from '@opencensus/exporter-jaeger';
 import { B3Format } from '@opencensus/propagation-b3';
-import * as WebSocket from 'ws';
+import { traceClient } from './ocproxy';
 
 const options = {
   serviceName: 'fortune-server',
@@ -38,7 +38,6 @@ return {
     }
   };
 };
-
 
 function apiRouter() {
     const router = express.Router();
@@ -78,78 +77,6 @@ async function initServer() {
     return server;
 }
 
-type Message = {
-    type: string,
-    name: string,
-    key: string,
-    parentId?: string,
-    spanId?: string
-}
-
-function traceClient() {
-    const wss = new WebSocket.Server({ port: 8889 });
-    wss.on('connection', (ws) => {
-        const spans = new Map<string, Span>();
-        let rootSpan: RootSpan;
-        ws.on('message', (rawMessage: string) => {
-            const message = JSON.parse(rawMessage) as Message;
-            switch (message.type) {
-            case 'start-root-span':
-            tracing.tracer.startRootSpan({name: message.name}, async newRootSpan => {
-                    rootSpan = newRootSpan;
-                    ws.send(JSON.stringify(
-                        {
-                            parentId: 'root',
-                            traceId: rootSpan.traceId,
-                            spanId: rootSpan.id
-                        }
-                    ));
-                    spans.set(rootSpan.id, rootSpan);
-                    console.log(message.type, {
-                        parentId: 'root',
-                        traceId: rootSpan.traceId,
-                        spanId: rootSpan.id
-                    });
-                });
-                break;
-            case 'start-child-span': {
-                try {
-                    const span = rootSpan.startChildSpan(message.name, SpanKind.CLIENT);
-                    ws.send(JSON.stringify(
-                        {
-                            key: message.key,
-                            traceId: span.traceId,
-                            spanId: span.id,
-                            parentId: message.parentId
-                        }
-                    ));
-                    spans.set(span.id, span);
-                    console.log(message.type, {
-                        key: message.key,
-                        traceId: span.traceId,
-                        spanId: span.id,
-                        parentId: message.parentId
-                    })
-                } catch (e) {
-                    console.log(e);
-                }
-                break;
-            }
-            case 'end-span': {
-                const span = spans.get(message.spanId as string);
-                if (span !== undefined) {
-                    span.end();
-                    spans.delete(message.spanId as string);
-                }
-                break;
-            }
-            }
-        });
-        ws.on('close', () => {
-            rootSpan.end();
-        });
-    });
-}
 
 async function main() {
     http.createServer(await initServer()).listen(8888, () => {
